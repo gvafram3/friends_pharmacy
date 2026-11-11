@@ -280,10 +280,9 @@ async function route(req, res, url, path, body, rawBody) {
     const { user, token } = await authenticatedUser(req);
     await request("/auth/v1/user", { method: "PUT", body: { password: body.password }, token, anon: true });
     if (user.app_metadata?.must_change_password === true) {
-      const { must_change_password: _, ...appMetadata } = user.app_metadata;
       await request(`/auth/v1/admin/users/${encodeURIComponent(user.id)}`, {
         method: "PUT",
-        body: { app_metadata: appMetadata }
+        body: { app_metadata: { ...user.app_metadata, must_change_password: false } }
       });
     }
     return send(res, 200, { password_updated: true });

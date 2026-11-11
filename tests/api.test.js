@@ -175,6 +175,7 @@ test("changing a temporary password removes the server-side reset requirement", 
   const supabaseUrl = "https://supabase.example";
   const staffId = "22222222-2222-4222-8222-222222222222";
   let updatedMetadata;
+  let mustChangePassword = true;
   process.env.SUPABASE_URL = supabaseUrl;
   process.env.SUPABASE_ANON_KEY = "test-anon-key";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-key";
@@ -183,7 +184,7 @@ test("changing a temporary password removes the server-side reset requirement", 
     if (url.origin !== supabaseUrl) return originalFetch(input, options);
     if (url.pathname === "/auth/v1/user" && options.method === "GET") {
       return new Response(JSON.stringify({
-        id: staffId, email: "staff@example.com", app_metadata: { must_change_password: true }
+        id: staffId, email: "staff@example.com", app_metadata: { must_change_password: mustChangePassword }
       }), { status: 200 });
     }
     if (url.pathname === "/auth/v1/user" && options.method === "PUT") {
@@ -191,7 +192,11 @@ test("changing a temporary password removes the server-side reset requirement", 
     }
     if (url.pathname === `/auth/v1/admin/users/${staffId}` && options.method === "PUT") {
       updatedMetadata = JSON.parse(options.body).app_metadata;
+      mustChangePassword = updatedMetadata.must_change_password;
       return new Response(JSON.stringify({ id: staffId }), { status: 200 });
+    }
+    if (url.pathname === "/rest/v1/rpc/get_my_branches") {
+      return new Response(JSON.stringify([]), { status: 200 });
     }
     throw new Error(`Unexpected mocked Supabase route: ${url.pathname} ${options.method || "GET"}`);
   };
@@ -208,7 +213,16 @@ test("changing a temporary password removes the server-side reset requirement", 
     });
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { password_updated: true });
-    assert.deepEqual(updatedMetadata, {});
+    assert.deepEqual(updatedMetadata, { must_change_password: false });
+
+    const workspace = await originalFetch(`${baseUrl}/api/me`, {
+      headers: { Cookie: "fp_access=test-token" }
+    });
+    assert.equal(workspace.status, 200);
+    assert.deepEqual(await workspace.json(), {
+      user: { id: staffId, email: "staff@example.com", must_change_password: false },
+      branches: []
+    });
   } finally {
     globalThis.fetch = originalFetch;
     for (const [key, value] of Object.entries(env)) {
