@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual, randomUUID } from "node:crypto";
 
 const API_PREFIX = "/api";
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -14,6 +14,10 @@ function getConfig() {
     anon: SUPABASE_ANON_KEY,
     service: SUPABASE_SERVICE_ROLE_KEY
   };
+}
+
+function applicationUrl(requestUrl) {
+  return process.env.APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : requestUrl.origin);
 }
 
 function send(res, status, payload) {
@@ -240,7 +244,14 @@ async function route(req, res, url, path, body, rawBody) {
     const password = body.password;
     const session = await authRequest("token?grant_type=password", { email, password });
     setSessionCookies(res, session);
-    return send(res, 200, { user: { id: session.user.id, email: session.user.email }, expires_in: session.expires_in });
+    return send(res, 200, {
+      user: {
+        id: session.user.id,
+        email: session.user.email,
+        must_change_password: session.user.app_metadata?.must_change_password === true
+      },
+      expires_in: session.expires_in
+    });
   }
   if (path === "/auth/refresh" && method === "POST") {
     assertSameOrigin(req);
@@ -253,16 +264,28 @@ async function route(req, res, url, path, body, rawBody) {
   if (path === "/auth/recovery" && method === "POST") {
     assertSameOrigin(req);
     const email = requiredText(body.email, "Email", 254).toLowerCase();
-    await authRequest("recover", { email, redirect_to: process.env.APP_URL });
+    await authRequest("recover", { email, redirect_to: applicationUrl(url) });
     return send(res, 200, { message: "If the account exists, a password recovery email will be sent." });
   }
   if (path === "/auth/password" && method === "POST") {
     assertSameOrigin(req);
-    const accessToken = requiredText(body.access_token, "Recovery token", 4096);
     if (typeof body.password !== "string" || body.password.length < 8 || body.password.length > 256) {
       throw Object.assign(new Error("Password must be between 8 and 256 characters."), { status: 400 });
     }
-    await request("/auth/v1/user", { method: "PUT", body: { password: body.password }, token: accessToken, anon: true });
+    if (body.access_token) {
+      const accessToken = requiredText(body.access_token, "Recovery token", 4096);
+      await request("/auth/v1/user", { method: "PUT", body: { password: body.password }, token: accessToken, anon: true });
+      return send(res, 200, { password_updated: true });
+    }
+    const { user, token } = await authenticatedUser(req);
+    await request("/auth/v1/user", { method: "PUT", body: { password: body.password }, token, anon: true });
+    if (user.app_metadata?.must_change_password === true) {
+      const { must_change_password: _, ...appMetadata } = user.app_metadata;
+      await request(`/auth/v1/admin/users/${encodeURIComponent(user.id)}`, {
+        method: "PUT",
+        body: { app_metadata: appMetadata }
+      });
+    }
     return send(res, 200, { password_updated: true });
   }
   if (path === "/auth/logout" && method === "POST") {
@@ -301,8 +324,21 @@ async function route(req, res, url, path, body, rawBody) {
 
   const { user } = await authenticatedUser(req);
   if (path === "/me" && method === "GET") {
+    const mustChangePassword = user.app_metadata?.must_change_password === true;
+    if (mustChangePassword) {
+      return send(res, 200, {
+        user: { id: user.id, email: user.email, must_change_password: true },
+        branches: []
+      });
+    }
     const branches = await rpc("get_my_branches", { p_user_id: user.id });
-    return send(res, 200, { user: { id: user.id, email: user.email }, branches });
+    return send(res, 200, { user: { id: user.id, email: user.email, must_change_password: false }, branches });
+  }
+  if (user.app_metadata?.must_change_password === true) {
+    throw Object.assign(new Error("Set a new password before accessing the pharmacy app."), {
+      status: 403,
+      code: "PASSWORD_CHANGE_REQUIRED"
+    });
   }
   if (path === "/setup" && method === "POST") {
     const allowedEmail = process.env.INITIAL_ADMIN_EMAIL?.trim().toLowerCase();
@@ -326,21 +362,53 @@ async function route(req, res, url, path, body, rawBody) {
     });
     return send(res, 201, result);
   }
-  if (path === "/staff/invite" && method === "POST") {
+  if (path === "/staff/create" && method === "POST") {
     const branchIds = body.branch_ids;
     if (!Array.isArray(branchIds) || !branchIds.length || branchIds.some(id => !validUuid(id))) {
       throw Object.assign(new Error("Select one or more valid branches."), { status: 400 });
     }
-    await requireBranch(user.id, branchIds[0], new Set(["owner", "admin"]));
+    await Promise.all(branchIds.map(branchId => requireBranch(user.id, branchId, new Set(["owner", "admin"]))));
     const role = body.role;
     if (!["admin", "manager", "cashier"].includes(role)) throw Object.assign(new Error("Invalid staff role."), { status: 400 });
     const email = requiredText(body.email, "Staff email", 254).toLowerCase();
-    const invitation = await request("/auth/v1/invite", {
-      method: "POST",
-      body: { email, data: { full_name: String(body.full_name || "").trim().slice(0, 120) } }
-    });
-    await rpc("invite_staff_membership", { p_actor_id: user.id, p_new_user_id: invitation.id, p_branch_ids: branchIds, p_role: role });
-    return send(res, 201, { invited: true, email });
+    const temporaryPassword = randomBytes(18).toString("base64url");
+    let createdUser;
+    let staffUserId;
+    try {
+      createdUser = await request("/auth/v1/admin/users", {
+        method: "POST",
+        body: {
+          email,
+          password: temporaryPassword,
+          email_confirm: true,
+          app_metadata: { must_change_password: true },
+          user_metadata: { full_name: String(body.full_name || "").trim().slice(0, 120) }
+        }
+      });
+    } catch (error) {
+      if (error.status === 422 || error.code === "email_exists") {
+        throw Object.assign(new Error("An account already exists for that email address."), { status: 409 });
+      }
+      throw error;
+    }
+    staffUserId = createdUser?.user?.id || createdUser?.id;
+    if (!validUuid(staffUserId)) {
+      throw Object.assign(new Error("Supabase did not return a valid staff account."), { status: 503 });
+    }
+    try {
+      await rpc("create_staff_membership", {
+        p_actor_id: user.id, p_new_user_id: staffUserId, p_branch_ids: branchIds, p_role: role
+      });
+    } catch (error) {
+      console.error("New staff branch access could not be saved.", { status: error.status, code: error.code });
+      try {
+        await request(`/auth/v1/admin/users/${encodeURIComponent(staffUserId)}`, { method: "DELETE" });
+      } catch (cleanupError) {
+        console.error("Could not remove the incomplete staff account.", { status: cleanupError.status, code: cleanupError.code });
+      }
+      throw Object.assign(new Error("The account could not be assigned to its selected branches. It was removed where possible; contact an administrator before retrying."), { status: 503 });
+    }
+    return send(res, 201, { created: true, email, temporary_password: temporaryPassword });
   }
 
   const branchId = url.searchParams.get("branch_id") || body.branch_id;
@@ -419,7 +487,7 @@ async function route(req, res, url, path, body, rawBody) {
     }
     if (sale.payment_url) return send(res, 200, { sale, authorization_url: sale.payment_url });
     let appUrl;
-    try { appUrl = new URL(process.env.APP_URL || url.origin); }
+    try { appUrl = new URL(applicationUrl(url)); }
     catch { throw Object.assign(new Error("APP_URL must be a valid absolute URL."), { status: 503 }); }
     if (process.env.NODE_ENV === "production" && appUrl.protocol !== "https:") {
       throw Object.assign(new Error("APP_URL must use HTTPS in production."), { status: 503 });

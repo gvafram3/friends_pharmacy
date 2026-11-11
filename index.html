@@ -16,9 +16,13 @@
   <header>
     <div class="logo"><span class="pill" aria-hidden="true"></span>FRIENDS PHARMACY</div>
     <nav id="nav" aria-label="Main navigation"></nav>
+    <button class="btn alt sm" id="theme-toggle" type="button" aria-label="Switch to dark mode">Dark mode</button>
   </header>
   <main id="app"></main>
   <dialog id="dlg" aria-label="Pharmacy dialog"></dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div id="loading" class="loading-overlay" role="status" aria-live="polite" aria-atomic="true" hidden>
+    <div class="loading-card"><span class="spinner" aria-hidden="true"></span><span>Loading...</span></div>
+  </div>
 </body>
 </html>

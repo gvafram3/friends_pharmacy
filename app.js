@@ -97,30 +97,89 @@ const seed = () => [
 let S = { user: null, branches: [], branchId: "", role: "", products: [], sales: [], salesSummary: {}, activity: [], cart: [], tab: "sell", q: "", disc: 0, pay: "Cash", tender: "", patient: "", prescriber: "" };
 let publicConfig = { currency: "GHS", paystackEnabled: false };
 let requestInFlight = false;
+let activeRequests = 0;
+let loadingHideTimer = 0;
 let recoveryToken = "";
 let checkoutKey = "";
 let checkoutFingerprint = "";
+let createdStaffAccount = null;
+function applyTheme(theme, persist = false) {
+  document.documentElement.dataset.theme = theme;
+  const toggle = $("#theme-toggle");
+  toggle.textContent = theme === "dark" ? "Light mode" : "Dark mode";
+  toggle.setAttribute("aria-label", `Switch to ${theme === "dark" ? "light" : "dark"} mode`);
+  document.querySelector('meta[name="theme-color"]').content = theme === "dark" ? "#0f1716" : "#f3f6f5";
+  if (persist) localStorage.setItem("friends-pharmacy-theme", theme);
+}
+function initializeTheme() {
+  const savedTheme = localStorage.getItem("friends-pharmacy-theme");
+  const theme = savedTheme === "light" || savedTheme === "dark" ? savedTheme :
+    window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  applyTheme(theme);
+}
+function toggleTheme() {
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
+}
+function updateLoading() {
+  const indicator = $("#loading");
+  if (!indicator) return;
+  clearTimeout(loadingHideTimer);
+  if (activeRequests > 0) {
+    indicator.hidden = false;
+    $("#app").setAttribute("aria-busy", "true");
+    return;
+  }
+  loadingHideTimer = setTimeout(() => {
+    if (activeRequests === 0) {
+      indicator.hidden = true;
+      $("#app").setAttribute("aria-busy", "false");
+    }
+  }, 120);
+}
+function passwordVisibilityIcon(visible) {
+  return visible
+    ? '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>'
+    : '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m3 3 18 18M10.6 5.2A10.7 10.7 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4.1M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7c1.5 0 2.8-.4 4-1"/></svg>';
+}
+function passwordField(id, label, autocomplete, minlength = 0) {
+  return `<label>${label}<span class="password-control"><input id="${id}" type="password" autocomplete="${autocomplete}" ${minlength ? `minlength="${minlength}"` : ""} maxlength="256" required><button class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" onclick="togglePasswordVisibility(this)">${passwordVisibilityIcon(false)}</button></span></label>`;
+}
+function togglePasswordVisibility(button) {
+  const input = button.closest(".password-control").querySelector("input");
+  const visible = input.type === "password";
+  input.type = visible ? "text" : "password";
+  button.setAttribute("aria-label", visible ? "Hide password" : "Show password");
+  button.setAttribute("aria-pressed", String(visible));
+  button.innerHTML = passwordVisibilityIcon(visible);
+}
 async function api(path, options = {}, retry = true) {
-  const response = await fetch(`/api${path}`, {
-    method: options.method || "GET",
-    credentials: "same-origin",
-    headers: options.body === undefined ? {} : { "Content-Type": "application/json" },
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })
-  });
-  if (response.status === 401 && retry && path !== "/auth/login" && path !== "/auth/refresh") {
-    const refreshed = await fetch("/api/auth/refresh", { method: "POST", credentials: "same-origin" });
-    if (refreshed.ok) return api(path, options, false);
-    S.user = null;
-    S.branches = [];
-    render();
+  activeRequests++;
+  updateLoading();
+  try {
+    const response = await fetch(`/api${path}`, {
+      method: options.method || "GET",
+      credentials: "same-origin",
+      headers: options.body === undefined ? {} : { "Content-Type": "application/json" },
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })
+    });
+    if (response.status === 401 && retry && path !== "/auth/login" && path !== "/auth/refresh") {
+      const refreshed = await fetch("/api/auth/refresh", { method: "POST", credentials: "same-origin" });
+      if (refreshed.ok) return await api(path, options, false);
+      S.user = null;
+      S.branches = [];
+      render();
+    }
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(result.error || result.msg || "The request could not be completed.");
+      error.status = response.status;
+      throw error;
+    }
+    return result;
+  } finally {
+    activeRequests--;
+    updateLoading();
   }
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(result.error || result.msg || "The request could not be completed.");
-    error.status = response.status;
-    throw error;
-  }
-  return result;
 }
 function vManage() {
   const branches = S.branches.map(branch => `<tr><td>${esc(branch.name)}</td><td>${esc(branch.code || "—")}</td><td>${esc(branch.role)}</td></tr>`).join("");
@@ -133,15 +192,29 @@ function vManage() {
       </form>
       <div class="tbl"><table><tr><th>Branch</th><th>Code</th><th>Your role</th></tr>${branches}</table></div>
     </section>
-    <section class="card"><h2>Invite staff</h2><p class="mute">The invitee receives an account setup email.</p>
-      <form class="auth-form" onsubmit="inviteStaff(event)">
+    <section class="card"><h2>Add staff account</h2><p class="mute">Create an account without sending email. Share its one-time temporary password securely; the staff member must change it before using the system.</p>
+      ${createdStaffAccount ? `<div class="card staff-credential" role="status"><b>Account created for ${esc(createdStaffAccount.email)}</b><p class="mute">Share this temporary password with the new staff member. It is shown only in this browser session.</p><div class="password-control"><input id="created-temp-password" type="password" value="${esc(createdStaffAccount.temporaryPassword)}" readonly autocomplete="off"><button class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" onclick="togglePasswordVisibility(this)">${passwordVisibilityIcon(false)}</button></div><div class="row"><button class="btn alt" type="button" onclick="copyTemporaryPassword()">Copy password</button><button class="btn alt" type="button" onclick="dismissStaffCredential()">Done</button></div></div>` : ""}
+      <form class="auth-form" onsubmit="createStaff(event)">
         <label>Staff email<input id="staff-email" type="email" required></label>
         <label>Role<select id="staff-role"><option value="cashier">Cashier</option><option value="manager">Manager</option><option value="admin">Admin</option></select></label>
         <fieldset class="branch-checks"><legend>Branch access</legend>${S.branches.map(branch => `<label><input type="checkbox" name="staff-branch" value="${branch.id}" ${branch.id === S.branchId ? "checked" : ""}>${esc(branch.name)}</label>`).join("")}</fieldset>
-        <button class="btn" type="submit">Send invitation</button>
+        <button class="btn" type="submit">Create account</button>
       </form>
     </section>
   </div>`;
+}
+async function copyTemporaryPassword() {
+  if (!createdStaffAccount) return;
+  try {
+    await navigator.clipboard.writeText(createdStaffAccount.temporaryPassword);
+    toast("Temporary password copied. Share it securely.");
+  } catch (error) {
+    toast("Clipboard access is unavailable. Reveal the password to copy it manually.");
+  }
+}
+function dismissStaffCredential() {
+  createdStaffAccount = null;
+  render();
 }
 async function createBranch(event) {
   event.preventDefault();
@@ -153,16 +226,18 @@ async function createBranch(event) {
     toast("Branch created.");
   } catch (error) { toast(error.message); }
 }
-async function inviteStaff(event) {
+async function createStaff(event) {
   event.preventDefault();
   const branchIds = [...document.querySelectorAll('input[name="staff-branch"]:checked')].map(input => input.value);
   if (!branchIds.length) return toast("Select at least one branch for this staff member.");
   try {
-    await api("/staff/invite", { method: "POST", body: {
+    const result = await api("/staff/create", { method: "POST", body: {
       email: $("#staff-email").value, role: $("#staff-role").value, branch_ids: branchIds
     } });
+    createdStaffAccount = { email: result.email, temporaryPassword: result.temporary_password };
     event.target.reset();
-    toast("Staff invitation sent.");
+    render();
+    toast("Staff account created. Share the temporary password securely.");
   } catch (error) { toast(error.message); }
 }
 async function login(event) {
@@ -188,6 +263,7 @@ async function recoverPassword(event) {
 async function logout() {
   try { await api("/auth/logout", { method: "POST" }, false); }
   catch (error) { console.error("Sign-out request failed.", error); }
+  createdStaffAccount = null;
   S = { user: null, branches: [], branchId: "", role: "", products: [], sales: [], salesSummary: {}, activity: [], cart: [], tab: "sell", q: "", disc: 0, pay: "Cash", tender: "", patient: "", prescriber: "" };
   render();
 }
@@ -196,6 +272,11 @@ async function loadWorkspace() {
     const { user, branches } = await api("/me");
     S.user = user;
     S.branches = branches;
+    if (user.must_change_password) {
+      S.tab = "password";
+      render();
+      return;
+    }
     if (!branches.length) {
       S.tab = "setup";
       render();
@@ -270,19 +351,23 @@ function totals() {
 
 function nav() {
   if (!S.user) { $("#nav").innerHTML = ""; return; }
+  if (S.user.must_change_password) {
+    $("#nav").innerHTML = `<span class="nav-user">${esc(S.user.email)}</span><button onclick="logout()">Sign out</button>`;
+    return;
+  }
   const tabs = [["sell", "Sell"], ["stock", "Stock"], ["alerts", "Alerts"], ["sales", "Sales"], ["activity", "Activity"]];
   if (["owner", "admin"].includes(S.role)) tabs.push(["manage", "Manage"]);
   $("#nav").innerHTML = `<select class="branch-picker" aria-label="Pharmacy branch" onchange="changeBranch(this.value)">${S.branches.map(branch => `<option value="${branch.id}" ${branch.id === S.branchId ? "selected" : ""}>${esc(branch.name)}</option>`).join("")}</select>` +
     tabs.map(([k, l]) => `<button class="${S.tab === k ? "on" : ""}" onclick="go('${k}')">${l}${k === "alerts" && alerts() ? `<span class="badge">${alerts()}</span>` : ""}</button>`).join("") +
     `<span class="nav-user">${esc(S.user.email)}</span><button onclick="logout()">Sign out</button>`;
 }
-const go = t => { S.tab = t; render(); };
+const go = t => { if (t !== "manage") createdStaffAccount = null; S.tab = t; render(); };
 
 function vLogin() {
   return `<section class="card auth-card"><h1>Sign in</h1><p class="mute">Use your pharmacy staff account to access sales and inventory.</p>
     <form class="auth-form" onsubmit="login(event)">
       <label>Email<input id="login-email" type="email" autocomplete="username" required></label>
-      <label>Password<input id="login-password" type="password" autocomplete="current-password" required></label>
+      ${passwordField("login-password", "Password", "current-password")}
       <button class="btn" type="submit">Sign in</button>
     </form>
     <form class="recovery-form" onsubmit="recoverPassword(event)">
@@ -292,15 +377,32 @@ function vLogin() {
 function vPasswordRecovery() {
   return `<section class="card auth-card"><h1>Choose a new password</h1><p class="mute">Use at least 8 characters.</p>
     <form class="auth-form" onsubmit="updatePassword(event)">
-      <label>New password<input id="new-password" type="password" autocomplete="new-password" minlength="8" maxlength="256" required></label>
+      ${passwordField("new-password", "New password", "new-password", 8)}
       <button class="btn" type="submit">Update password</button>
+    </form></section>`;
+}
+function vTemporaryPasswordChange() {
+  return `<section class="card auth-card"><h1>Change your temporary password</h1><p class="mute">Choose a new password of at least 8 characters before continuing.</p>
+    <form class="auth-form" onsubmit="updatePassword(event)">
+      ${passwordField("new-password", "New password", "new-password", 8)}
+      <button class="btn" type="submit">Set new password</button>
+      <button class="btn alt" type="button" onclick="logout()">Sign out</button>
     </form></section>`;
 }
 async function updatePassword(event) {
   event.preventDefault();
   try {
-    await api("/auth/password", { method: "POST", body: { access_token: recoveryToken, password: $("#new-password").value } }, false);
+    const mustChangePassword = S.user?.must_change_password === true;
+    await api("/auth/password", { method: "POST", body: {
+      ...(mustChangePassword ? {} : { access_token: recoveryToken }),
+      password: $("#new-password").value
+    } }, false);
     recoveryToken = "";
+    if (mustChangePassword) {
+      await logout();
+      toast("Password updated. Sign in with your new password.");
+      return;
+    }
     toast("Password updated. Sign in with your new password.");
     render();
   } catch (error) { toast(error.message); }
@@ -327,6 +429,7 @@ async function initializeSetup(event) {
 function render() {
   nav();
   $("#app").innerHTML = recoveryToken ? vPasswordRecovery() : !S.user ? vLogin() :
+    S.user.must_change_password ? vTemporaryPasswordChange() :
     S.tab === "setup" ? vSetup() :
       S.tab === "manage" ? vManage() :
       ({ sell: vSell, stock: vStock, alerts: vAlerts, sales: vSales, activity: vActivity })[S.tab]();
@@ -351,15 +454,9 @@ function refreshProductCards() {
   const grid = $("#product-grid");
   if (grid) grid.innerHTML = productCards();
 }
-function vSell() {
+function salePanel() {
   const hasRx = S.cart.some(l => P(l.id).rx);
-  return `<div class="sell">
-  <section class="card">
-    <input id="q" type="search" placeholder="Search by name, generic, category or scan barcode / SKU" value="${esc(S.q)}" oninput="S.q=this.value;refreshProductCards()" onkeydown="if(event.key==='Enter')scanEnter()" autofocus>
-    <div class="grid" id="product-grid">${productCards()}</div>
-  </section>
-  <aside class="card">
-    <div class="row sp"><h2>Current sale</h2>${S.cart.length ? '<button class="btn alt sm" onclick="S.cart=[];render()">Clear</button>' : ""}</div>
+  return `<div class="row sp"><h2>Current sale</h2>${S.cart.length ? '<button class="btn alt sm" onclick="clearCart()">Clear</button>' : ""}</div>
     ${S.cart.length ? S.cart.map(l => { const p = P(l.id); return `<div class="cart-line">
       <div><b>${esc(p.name)}</b> ${p.rx ? '<span class="tag rx">Rx</span>' : ""}<br><small class="mute">${money(p.price)} each</small></div>
       <div class="qty"><button onclick="chg('${l.id}',-1)" aria-label="Decrease">−</button><b>${l.qty}</b><button onclick="chg('${l.id}',1)" aria-label="Increase">+</button></div>
@@ -367,12 +464,23 @@ function vSell() {
     ${hasRx ? `<div class="form patient-details"><label class="full">Patient name (required for Rx items)<input value="${esc(S.patient)}" oninput="S.patient=this.value;chk()"></label><label class="full">Prescriber<input value="${esc(S.prescriber)}" oninput="S.prescriber=this.value"></label></div>` : ""}
     <div class="form sale-fields">
       <label>Discount %<input id="discount" type="number" min="0" max="100" value="${S.disc}" oninput="S.disc=this.value;refreshSaleSummary()"></label>
-      <label>Payment<select onchange="S.pay=this.value;render()">${["Cash", ...(publicConfig.paystackEnabled ? ["Card", "Mobile money"] : [])].map(x => `<option ${S.pay === x ? "selected" : ""}>${x}</option>`).join("")}</select></label>
+      <label>Payment<select onchange="S.pay=this.value;refreshSalePanel()">${["Cash", ...(publicConfig.paystackEnabled ? ["Card", "Mobile money"] : [])].map(x => `<option ${S.pay === x ? "selected" : ""}>${x}</option>`).join("")}</select></label>
       ${S.pay === "Cash" ? `<label class="full">Cash received<input id="tender" type="number" min="0" step="0.01" value="${esc(S.tender)}" oninput="S.tender=this.value;refreshSaleSummary()"></label>` : ""}
     </div>
     <div id="sale-summary">${saleSummary()}</div>
-  </aside></div>`;
+  `;
 }
+function vSell() {
+  return `<div class="sell">
+  <section class="card">
+    <input id="q" type="search" placeholder="Search by name, generic, category or scan barcode / SKU" value="${esc(S.q)}" oninput="S.q=this.value;refreshProductCards()" onkeydown="if(event.key==='Enter')scanEnter()" autofocus>
+    <div class="grid" id="product-grid">${productCards()}</div>
+  </section>
+  <aside class="card" id="sale-panel">${salePanel()}</aside>
+  </div>`;
+}
+function refreshSalePanel() { const panel = $("#sale-panel"); if (panel) panel.innerHTML = salePanel(); }
+function clearCart() { S.cart = []; refreshSalePanel(); }
 function saleSummary() {
   const t = totals(), tender = +S.tender || 0;
   const hasRx = S.cart.some(l => P(l.id)?.rx);
@@ -389,21 +497,26 @@ function chk() { refreshSaleSummary(); }
 function upd() { refreshSaleSummary(); }
 function scanEnter() {
   const m = S.products.filter(p => p.sku.toLowerCase() === S.q.toLowerCase().trim());
-  if (m.length) { add(m[0].id); S.q = ""; render(); }
+  if (m.length && add(m[0].id)) {
+    S.q = "";
+    $("#q").value = "";
+    refreshProductCards();
+  }
 }
 function add(id) {
   const p = P(id), l = S.cart.find(x => x.id === id);
-  if (!p) return toast("This product is no longer available.");
-  if ((l ? l.qty : 0) + 1 > sellable(p)) return toast("Only " + sellable(p) + " unexpired units are in stock.");
+  if (!p) { toast("This product is no longer available."); return false; }
+  if ((l ? l.qty : 0) + 1 > sellable(p)) { toast("Only " + sellable(p) + " unexpired units are in stock."); return false; }
   l ? l.qty++ : S.cart.push({ id, qty: 1 });
-  render();
+  refreshSalePanel();
+  return true;
 }
 function chg(id, d) {
   const l = S.cart.find(x => x.id === id), p = P(id);
   if (!l || !p) return toast("This product is no longer available.");
   if (d > 0 && l.qty + 1 > sellable(p)) return toast("Only " + sellable(p) + " unexpired units are in stock.");
   l.qty += d; if (l.qty <= 0) S.cart = S.cart.filter(x => x.id !== id);
-  render();
+  refreshSalePanel();
 }
 async function checkout() {
   if (!S.cart.length) return toast("Add at least one product before completing a sale.");
@@ -629,4 +742,6 @@ async function startApp() {
     $("#app").innerHTML = `<section class="card auth-card"><h1>Unable to connect</h1><p>${esc(error.message)}</p><button class="btn" onclick="startApp()">Try again</button></section>`;
   }
 }
+initializeTheme();
+$("#theme-toggle").addEventListener("click", toggleTheme);
 startApp();

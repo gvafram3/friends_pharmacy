@@ -9,11 +9,13 @@ A multi-branch pharmacy point-of-sale and inventory application. The browser UI 
 - FEFO stock allocation, expiry/low-stock warnings, server-validated sales, and branch activity history.
 - Cash checkout and Paystack card/mobile-money checkout. Online payments reserve stock and are only completed after server-side gateway verification.
 - All-time/today sales summaries, printable receipts, and CSV export of the latest 500 sales.
+- Admin-created staff accounts with role and branch access; temporary passwords must be changed before workspace access.
+- Responsive layouts, visible request loading feedback, and a persistent light/dark mode switch.
 
 ## Requirements
 
 - A Supabase project with the SQL Editor and Auth enabled.
-- A Vercel account. Git integration is optional; the Vercel CLI can deploy this folder directly.
+- A Vercel account connected to this GitHub repository for automatic deployments.
 - A Paystack account for online payments. Begin with test keys.
 - Node.js 20 or newer for local checks and local development.
 
@@ -36,16 +38,16 @@ The migration disables direct table access for browser roles and enables row-lev
 
 For the first administrator, create the Auth user in Supabase before signing in. The first successful login is shown the organization/branch setup form. The API only allows bootstrap for `INITIAL_ADMIN_EMAIL`, and setup can only be completed once.
 
+Owners and admins can create staff accounts by email and assign roles/branches. The server generates a one-time temporary password and shows it to the administrator once; share it with the staff member through a secure channel. The first successful login is restricted to setting a new password. The API enforces that restriction until the password is changed. Staff creation does not depend on Supabase email delivery.
+
 ## Vercel deployment
 
-1. In a VS Code terminal opened at the project folder, run `vercel login` and complete the sign-in in your browser. Confirm with `vercel whoami`.
-2. Run `vercel` and follow the prompts to create/link a Vercel project. Choose the **Other** framework preset, use this folder as the project root, and leave build/output settings empty. The CLI deploys directly; a Git repository is optional.
-3. In **Project → Settings → Environment Variables**, add `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `INITIAL_ADMIN_EMAIL` for **Preview**. Enter secret values directly in Vercel; do not send them in chat. Keep `PAYSTACK_SECRET_KEY` unset until ready to test Paystack.
-4. Redeploy a preview so the environment variables take effect. Set `APP_URL` to that preview's HTTPS URL and redeploy again if password recovery or Paystack callbacks need to return to the preview.
-5. Test login, initial owner setup, inventory, branch access, cash checkout, and receipt/CSV behavior using test data.
-6. Add a production domain in Vercel when ready. Configure Supabase Auth's production site URL and redirect allow-list for that domain, then add production-scoped environment variables in Vercel and deploy with `vercel --prod`.
-7. For Paystack, add a test secret key only to Vercel's server environment, redeploy, and configure the test webhook at `https://your-domain/api/payments/webhook`. Keep live credentials unset until test-mode and compliance reviews are complete.
-8. Configure `CRON_SECRET` directly in Vercel and verify the scheduled cleanup route/job. After successful testing and operational review, live Paystack credentials may be added through Vercel settings followed by a controlled production deployment.
+1. Connect the Vercel project to `gvafram3/friends_pharmacy` under **Project → Settings → Git** and set `main` as the Production Branch. Vercel will create Preview deployments for other branches and deploy Production on each push to `main`.
+2. In **Project → Settings → Environment Variables**, add `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `INITIAL_ADMIN_EMAIL` to **Preview** and **Production**. Add `APP_URL` and `CRON_SECRET` to **Production**. Enter secrets directly in Vercel; never send them in chat or commit them. Keep `PAYSTACK_SECRET_KEY` unset until ready to test Paystack.
+3. Apply `supabase/migrations/202611110002_create_staff_membership.sql` in the Supabase SQL Editor before using staff account creation. The initial schema migration must already be applied.
+4. Configure Supabase Auth's site URL and redirect allow-list for the production domain. Recovery links use `APP_URL`.
+5. Push changes to a branch to get a Preview deployment; merge or push to `main` for Production. Verify the Vercel deployment is Ready, then test login, staff password setup, inventory, cash checkout, and receipts using test data.
+6. For Paystack, add a test secret key only to Vercel's server environment, then configure the test webhook at `https://your-domain/api/payments/webhook`. Keep live credentials unset until test-mode and compliance reviews are complete.
 
 `vercel.json` sets baseline security headers and schedules daily cleanup of expired payment reservations (midnight UTC), compatible with Vercel Hobby. Pending reservations are also expired when a new sale is created, but abandoned reservations can hold stock until the scheduled cleanup. Use a plan and schedule that support more frequent cleanup before relying on this for production operations.
 
