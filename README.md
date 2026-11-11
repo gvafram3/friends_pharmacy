@@ -9,8 +9,9 @@ A multi-branch pharmacy point-of-sale and inventory application. The browser UI 
 - FEFO stock allocation, expiry/low-stock warnings, server-validated sales, and branch activity history.
 - Cash checkout and Paystack card/mobile-money checkout. Online payments reserve stock and are only completed after server-side gateway verification.
 - All-time/today sales summaries, printable receipts, and CSV export of the latest 500 sales.
+- Sales history refreshes when revisited and while open, and the last selected branch and page are remembered per staff account on that device.
 - Admin-created staff accounts with role and branch access; temporary passwords must be changed before workspace access.
-- Responsive layouts, visible request loading feedback, and a persistent light/dark mode switch.
+- Responsive layouts with a mobile cart-total shortcut, visible request loading feedback, and a persistent light/dark mode switch.
 
 ## Requirements
 

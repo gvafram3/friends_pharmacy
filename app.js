@@ -99,6 +99,8 @@ let publicConfig = { currency: "GHS", paystackEnabled: false };
 let requestInFlight = false;
 let activeRequests = 0;
 let loadingHideTimer = 0;
+let salesRefreshTimer = 0;
+let salesRefreshInFlight = false;
 let recoveryToken = "";
 let checkoutKey = "";
 let checkoutFingerprint = "";
@@ -125,13 +127,13 @@ function updateLoading() {
   if (!indicator) return;
   clearTimeout(loadingHideTimer);
   if (activeRequests > 0) {
-    indicator.hidden = false;
+    if (!indicator.open) indicator.showModal();
     $("#app").setAttribute("aria-busy", "true");
     return;
   }
   loadingHideTimer = setTimeout(() => {
     if (activeRequests === 0) {
-      indicator.hidden = true;
+      if (indicator.open) indicator.close();
       $("#app").setAttribute("aria-busy", "false");
     }
   }, 120);
@@ -153,12 +155,16 @@ function togglePasswordVisibility(button) {
   button.innerHTML = passwordVisibilityIcon(visible);
 }
 async function api(path, options = {}, retry = true) {
-  activeRequests++;
-  updateLoading();
+  const trackLoading = options.loading !== false;
+  if (trackLoading) {
+    activeRequests++;
+    updateLoading();
+  }
   try {
     const response = await fetch(`/api${path}`, {
       method: options.method || "GET",
       credentials: "same-origin",
+      cache: "no-store",
       headers: options.body === undefined ? {} : { "Content-Type": "application/json" },
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })
     });
@@ -177,8 +183,10 @@ async function api(path, options = {}, retry = true) {
     }
     return result;
   } finally {
-    activeRequests--;
-    updateLoading();
+    if (trackLoading) {
+      activeRequests--;
+      updateLoading();
+    }
   }
 }
 function vManage() {
@@ -282,8 +290,9 @@ async function loadWorkspace() {
       render();
       return;
     }
-    if (!branches.some(branch => branch.id === S.branchId)) S.branchId = branches[0].id;
+    restoreWorkspaceView(user, branches);
     await loadBranchData();
+    saveWorkspaceView();
     const reference = new URLSearchParams(location.search).get("reference");
     if (reference) {
       const payment = await api(`/payments/verify?reference=${encodeURIComponent(reference)}`);
@@ -311,6 +320,11 @@ async function loadBranchData() {
       ...batch, qty: Number(batch.qty), reserved: Number(batch.reserved), available: Number(batch.available), cost: Number(batch.cost)
     }))
   }));
+  applySalesData(sales);
+  S.activity = activity.activity;
+  S.role = S.branches.find(item => item.id === S.branchId)?.role || "";
+}
+function applySalesData(sales) {
   S.sales = sales.sales.map(sale => ({
     ...sale, no: Number(sale.no), total: Number(sale.total), disc: Number(sale.disc || 0),
     pay: sale.pay === "cash" ? "Cash" : sale.pay === "card" ? "Card" : "Mobile money",
@@ -319,8 +333,36 @@ async function loadBranchData() {
     }))
   }));
   S.salesSummary = sales.summary;
-  S.activity = activity.activity;
-  S.role = S.branches.find(item => item.id === S.branchId)?.role || "";
+}
+async function refreshBranchSales(notify = false) {
+  if (!S.user || S.user.must_change_password || S.tab !== "sales" || !S.branchId || salesRefreshInFlight || document.hidden) return;
+  salesRefreshInFlight = true;
+  const branchId = S.branchId;
+  try {
+    const sales = await api(`/sales?branch_id=${encodeURIComponent(branchId)}`, { loading: false });
+    if (branchId !== S.branchId) return;
+    applySalesData(sales);
+    refreshSalesView();
+  } catch (error) {
+    console.error("Could not refresh branch sales.", error);
+    if (notify) toast("Sales could not be refreshed. Check your connection and try again.");
+  } finally {
+    salesRefreshInFlight = false;
+  }
+}
+function restoreWorkspaceView(user, branches) {
+  const savedBranch = localStorage.getItem(`friends-pharmacy-branch:${user.id}`);
+  S.branchId = branches.some(branch => branch.id === savedBranch) ? savedBranch : branches[0].id;
+  const role = branches.find(branch => branch.id === S.branchId)?.role;
+  const allowedTabs = ["sell", "stock", "alerts", "sales", "activity"];
+  if (["owner", "admin"].includes(role)) allowedTabs.push("manage");
+  const savedTab = localStorage.getItem(`friends-pharmacy-tab:${user.id}`);
+  S.tab = allowedTabs.includes(savedTab) ? savedTab : "sell";
+}
+function saveWorkspaceView() {
+  if (!S.user?.id || S.user.must_change_password || !S.branchId) return;
+  localStorage.setItem(`friends-pharmacy-branch:${S.user.id}`, S.branchId);
+  localStorage.setItem(`friends-pharmacy-tab:${S.user.id}`, S.tab);
 }
 async function changeBranch(id) {
   const previousBranchId = S.branchId;
@@ -329,7 +371,11 @@ async function changeBranch(id) {
   S.q = "";
   S.disc = 0;
   S.tender = "";
-  try { await loadBranchData(); render(); }
+  try {
+    await loadBranchData();
+    saveWorkspaceView();
+    render();
+  }
   catch (error) { S.branchId = previousBranchId; render(); toast(error.message); }
 }
 const toast = m => { const t = $("#toast"); t.textContent = m; t.style.display = "block"; clearTimeout(t._t); t._t = setTimeout(() => t.style.display = "none", 2600); };
@@ -361,7 +407,13 @@ function nav() {
     tabs.map(([k, l]) => `<button class="${S.tab === k ? "on" : ""}" onclick="go('${k}')">${l}${k === "alerts" && alerts() ? `<span class="badge">${alerts()}</span>` : ""}</button>`).join("") +
     `<span class="nav-user">${esc(S.user.email)}</span><button onclick="logout()">Sign out</button>`;
 }
-const go = t => { if (t !== "manage") createdStaffAccount = null; S.tab = t; render(); };
+const go = t => {
+  if (t !== "manage") createdStaffAccount = null;
+  S.tab = t;
+  saveWorkspaceView();
+  render();
+  if (t === "sales") refreshBranchSales(true);
+};
 
 function vLogin() {
   return `<section class="card auth-card"><h1>Sign in</h1><p class="mute">Use your pharmacy staff account to access sales and inventory.</p>
@@ -433,6 +485,7 @@ function render() {
     S.tab === "setup" ? vSetup() :
       S.tab === "manage" ? vManage() :
       ({ sell: vSell, stock: vStock, alerts: vAlerts, sales: vSales, activity: vActivity })[S.tab]();
+  document.body.classList.toggle("has-mobile-cart", S.tab === "sell" && S.cart.length > 0);
   $("#app").classList.remove("page-enter");
   void $("#app").offsetWidth;
   $("#app").classList.add("page-enter");
@@ -477,9 +530,28 @@ function vSell() {
     <div class="grid" id="product-grid">${productCards()}</div>
   </section>
   <aside class="card" id="sale-panel">${salePanel()}</aside>
-  </div>`;
+  </div>
+  <aside class="mobile-sale-summary" id="mobile-sale-summary" ${S.cart.length ? "" : "hidden"}>
+    <div><span id="mobile-cart-count">${cartItemCount()} item${cartItemCount() === 1 ? "" : "s"}</span><b id="mobile-cart-total">${money(totals().total)}</b></div>
+    <button class="btn alt" type="button" onclick="$('#sale-panel').scrollIntoView({behavior:'smooth',block:'center'})">View cart</button>
+  </aside>`;
 }
-function refreshSalePanel() { const panel = $("#sale-panel"); if (panel) panel.innerHTML = salePanel(); }
+function cartItemCount() { return S.cart.reduce((count, item) => count + item.qty, 0); }
+function refreshMobileSaleSummary() {
+  const count = cartItemCount();
+  document.body.classList.toggle("has-mobile-cart", S.tab === "sell" && count > 0);
+  const bar = $("#mobile-sale-summary");
+  if (!bar) return;
+  bar.hidden = count === 0;
+  $("#mobile-cart-count").textContent = `${count} item${count === 1 ? "" : "s"}`;
+  $("#mobile-cart-total").textContent = money(totals().total);
+  document.body.classList.toggle("has-mobile-cart", S.tab === "sell" && count > 0);
+}
+function refreshSalePanel() {
+  const panel = $("#sale-panel");
+  if (panel) panel.innerHTML = salePanel();
+  refreshMobileSaleSummary();
+}
 function clearCart() { S.cart = []; refreshSalePanel(); }
 function saleSummary() {
   const t = totals(), tender = +S.tender || 0;
@@ -492,7 +564,11 @@ function saleSummary() {
     ${S.pay === "Cash" && tender >= t.total && S.cart.length ? `<div class="row sp"><span>Change</span><b>${money(tender - t.total)}</b></div>` : ""}
     <button class="btn checkout-btn" id="pay" ${ready ? "" : "disabled"} onclick="checkout()">Complete sale</button>`;
 }
-function refreshSaleSummary() { const summary = $("#sale-summary"); if (summary) summary.innerHTML = saleSummary(); }
+function refreshSaleSummary() {
+  const summary = $("#sale-summary");
+  if (summary) summary.innerHTML = saleSummary();
+  refreshMobileSaleSummary();
+}
 function chk() { refreshSaleSummary(); }
 function upd() { refreshSaleSummary(); }
 function scanEnter() {
@@ -707,12 +783,24 @@ function vAlerts() {
 }
 
 /* ---------- SALES ---------- */
-function vSales() {
-  const completedSales = S.sales.filter(s => s.status === "completed");
+function salesSummaryCards() {
   const summary = S.salesSummary;
-  return `<div class="stats"><div class="card stat"><b>${money(summary.today_total || 0)}</b><span>Sales today (${summary.today_count || 0})</span></div><div class="card stat"><b>${summary.today_profit == null ? "Restricted" : money(summary.today_profit)}</b><span>Profit today</span></div><div class="card stat"><b>${money(summary.all_time_total || 0)}</b><span>All-time sales</span></div><div class="card stat"><b>${summary.best_seller ? esc(summary.best_seller) : "None yet"}</b><span>Best seller${summary.best_seller ? ` (${summary.best_seller_quantity} sold)` : ""}</span></div></div>
-  <div class="card"><div class="row sp sales-toolbar"><h3>Sales history (latest 500)</h3><button class="btn alt sm" onclick="exportCsv()">Export CSV</button></div>
-  ${completedSales.length ? `<div class="tbl"><table><tr><th>#</th><th>Date</th><th>Items</th><th>Payment</th><th>Patient</th><th>Total</th><th></th></tr>${completedSales.map(s => `<tr><td>${s.no}</td><td>${new Date(s.at).toLocaleString()}</td><td>${s.items.reduce((a, i) => a + i.qty, 0)}</td><td>${esc(s.pay)}</td><td>${esc(s.patient) || "-"}</td><td><b>${money(s.total)}</b></td><td><button class="btn alt sm" onclick="showReceipt(S.sales.find(x=>x.id==='${s.id}'))">Receipt</button></td></tr>`).join("")}</table></div>` : '<div class="empty">No completed sales yet. Complete a sale on the Sell tab and it will appear here.</div>'}</div>`;
+  return `<div class="card stat"><b>${money(summary.today_total || 0)}</b><span>Sales today (${summary.today_count || 0})</span></div><div class="card stat"><b>${summary.today_profit == null ? "Restricted" : money(summary.today_profit)}</b><span>Profit today</span></div><div class="card stat"><b>${money(summary.all_time_total || 0)}</b><span>All-time sales</span></div><div class="card stat"><b>${summary.best_seller ? esc(summary.best_seller) : "None yet"}</b><span>Best seller${summary.best_seller ? ` (${summary.best_seller_quantity} sold)` : ""}</span></div>`;
+}
+function salesHistory() {
+  const completedSales = S.sales.filter(s => s.status === "completed");
+  return `${completedSales.length ? `<div class="tbl"><table><tr><th>#</th><th>Date</th><th>Items</th><th>Payment</th><th>Patient</th><th>Total</th><th></th></tr>${completedSales.map(s => `<tr><td>${s.no}</td><td>${new Date(s.at).toLocaleString()}</td><td>${s.items.reduce((a, i) => a + i.qty, 0)}</td><td>${esc(s.pay)}</td><td>${esc(s.patient) || "-"}</td><td><b>${money(s.total)}</b></td><td><button class="btn alt sm" onclick="showReceipt(S.sales.find(x=>x.id==='${s.id}'))">Receipt</button></td></tr>`).join("")}</table></div>` : '<div class="empty">No completed sales yet. Complete a sale on the Sell tab and it will appear here.</div>'}<p class="mute sales-history-count">Showing ${completedSales.length} completed sale${completedSales.length === 1 ? "" : "s"} from up to the latest 500 records.</p>`;
+}
+function refreshSalesView() {
+  const stats = $("#sales-stats");
+  const history = $("#sales-history");
+  if (stats) stats.innerHTML = salesSummaryCards();
+  if (history) history.innerHTML = salesHistory();
+}
+function vSales() {
+  return `<div class="stats" id="sales-stats">${salesSummaryCards()}</div>
+  <div class="card"><div class="row sp sales-toolbar"><h3>Sales history</h3><button class="btn alt sm" onclick="exportCsv()">Export CSV</button></div>
+  <div id="sales-history">${salesHistory()}</div></div>`;
 }
 function exportCsv() {
   const rows = [["Receipt", "Date", "Payment", "Patient", "Item", "Qty", "Price", "Sale total"]];
@@ -744,4 +832,9 @@ async function startApp() {
 }
 initializeTheme();
 $("#theme-toggle").addEventListener("click", toggleTheme);
+window.addEventListener("focus", () => refreshBranchSales(true));
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshBranchSales(true);
+});
+salesRefreshTimer = setInterval(() => refreshBranchSales(), 30000);
 startApp();
