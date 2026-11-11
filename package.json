@@ -1,0 +1,9 @@
+{
+  "name": "friends-pharmacy-pos",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check app.js && node --check \"api/[...path].js\"",
+    "test": "node --test"
+  }
+}
