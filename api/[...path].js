@@ -361,6 +361,22 @@ async function route(req, res, url, path, body, rawBody) {
     });
     return send(res, 201, result);
   }
+  const branchId = url.searchParams.get("branch_id") || body.branch_id;
+  if (path === "/staff" && method === "GET") {
+    await requireBranch(user.id, branchId, new Set(["owner", "admin"]));
+    const staff = await rpc("get_organization_staff", { p_actor_id: user.id, p_branch_id: branchId });
+    return send(res, 200, { staff });
+  }
+  const staffMatch = path.match(/^\/staff\/([0-9a-f-]+)$/i);
+  if (staffMatch && method === "PATCH") {
+    if (!validUuid(staffMatch[1])) throw Object.assign(new Error("Invalid staff account identifier."), { status: 400 });
+    await requireBranch(user.id, branchId, new Set(["owner", "admin"]));
+    const fullName = requiredText(body.full_name, "Full name", 120);
+    await rpc("update_organization_staff_name", {
+      p_actor_id: user.id, p_branch_id: branchId, p_staff_user_id: staffMatch[1], p_full_name: fullName
+    });
+    return send(res, 200, { updated: true, full_name: fullName });
+  }
   if (path === "/staff/create" && method === "POST") {
     const branchIds = body.branch_ids;
     if (!Array.isArray(branchIds) || !branchIds.length || branchIds.some(id => !validUuid(id))) {
@@ -370,6 +386,7 @@ async function route(req, res, url, path, body, rawBody) {
     const role = body.role;
     if (!["admin", "manager", "cashier"].includes(role)) throw Object.assign(new Error("Invalid staff role."), { status: 400 });
     const email = requiredText(body.email, "Staff email", 254).toLowerCase();
+    const fullName = requiredText(body.full_name, "Full name", 120);
     const temporaryPassword = randomBytes(18).toString("base64url");
     let createdUser;
     let staffUserId;
@@ -381,7 +398,7 @@ async function route(req, res, url, path, body, rawBody) {
           password: temporaryPassword,
           email_confirm: true,
           app_metadata: { must_change_password: true },
-          user_metadata: { full_name: String(body.full_name || "").trim().slice(0, 120) }
+          user_metadata: { full_name: fullName }
         }
       });
     } catch (error) {
@@ -407,10 +424,9 @@ async function route(req, res, url, path, body, rawBody) {
       }
       throw Object.assign(new Error("The account could not be assigned to its selected branches. It was removed where possible; contact an administrator before retrying."), { status: 503 });
     }
-    return send(res, 201, { created: true, email, temporary_password: temporaryPassword });
+    return send(res, 201, { created: true, email, full_name: fullName, temporary_password: temporaryPassword });
   }
 
-  const branchId = url.searchParams.get("branch_id") || body.branch_id;
   if (path === "/products" && method === "GET") {
     await requireBranch(user.id, branchId);
     return send(res, 200, { products: await rpc("get_branch_products", { p_user_id: user.id, p_branch_id: branchId }) });
@@ -526,7 +542,7 @@ async function route(req, res, url, path, body, rawBody) {
     return send(res, 200, await confirmPayment(reference));
   }
   if (path === "/activity" && method === "GET") {
-    await requireBranch(user.id, branchId);
+    await requireBranch(user.id, branchId, new Set(["owner", "admin", "manager"]));
     return send(res, 200, { activity: await rpc("get_branch_activity", { p_user_id: user.id, p_branch_id: branchId }) });
   }
 

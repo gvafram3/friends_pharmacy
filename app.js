@@ -94,7 +94,7 @@ const seed = () => [
 ["Infant Formula 400g","Formula","Baby care",75,55,25,6,300,0]
 ].map((r, i) => ({ id: uid(), sku: "PH" + String(1001 + i), name: r[0], generic: r[1], cat: r[2], price: r[3], cost: r[4], batches: [{ id: uid(), qty: r[5], cost: r[4], exp: dayOff(r[7]) }], min: r[6], rx: !!r[8] }));
 
-let S = { user: null, branches: [], branchId: "", role: "", products: [], sales: [], salesSummary: {}, activity: [], cart: [], tab: "sell", q: "", disc: 0, pay: "Cash", tender: "", patient: "", prescriber: "" };
+let S = { user: null, branches: [], branchId: "", role: "", products: [], sales: [], salesSummary: {}, activity: [], staff: [], staffLoading: false, cart: [], tab: "sell", q: "", disc: 0, pay: "Cash", tender: "", patient: "", prescriber: "" };
 let publicConfig = { currency: "GHS", paystackEnabled: false };
 let requestInFlight = false;
 let activeRequests = 0;
@@ -191,6 +191,10 @@ async function api(path, options = {}, retry = true) {
 }
 function vManage() {
   const branches = S.branches.map(branch => `<tr><td>${esc(branch.name)}</td><td>${esc(branch.code || "—")}</td><td>${esc(branch.role)}</td></tr>`).join("");
+  const staffRows = S.staff.map(staff => `<tr>
+    <td><form class="staff-name-form" onsubmit="updateStaffName(event,'${staff.id}')"><input aria-label="Full name for ${esc(staff.email)}" id="staff-name-${staff.id}" maxlength="120" value="${esc(staff.full_name)}" required><button class="btn alt sm" type="submit">Save name</button></form></td>
+    <td>${esc(staff.email)}</td><td>${esc(staff.roles.join(", "))}</td><td>${esc(staff.branches.join(", "))}</td><td>${staff.active ? "Active" : "Inactive"}</td>
+  </tr>`).join("");
   return `<div class="manage-grid">
     <section class="card"><h2>Branches</h2><p class="mute">Add a branch to this pharmacy organization.</p>
       <form class="auth-form" onsubmit="createBranch(event)">
@@ -203,11 +207,15 @@ function vManage() {
     <section class="card"><h2>Add staff account</h2><p class="mute">Create an account without sending email. Share its one-time temporary password securely; the staff member must change it before using the system.</p>
       ${createdStaffAccount ? `<div class="card staff-credential" role="status"><b>Account created for ${esc(createdStaffAccount.email)}</b><p class="mute">Share this temporary password with the new staff member. It is shown only in this browser session.</p><div class="password-control"><input id="created-temp-password" type="password" value="${esc(createdStaffAccount.temporaryPassword)}" readonly autocomplete="off"><button class="password-toggle" type="button" aria-label="Show password" aria-pressed="false" onclick="togglePasswordVisibility(this)">${passwordVisibilityIcon(false)}</button></div><div class="row"><button class="btn alt" type="button" onclick="copyTemporaryPassword()">Copy password</button><button class="btn alt" type="button" onclick="dismissStaffCredential()">Done</button></div></div>` : ""}
       <form class="auth-form" onsubmit="createStaff(event)">
+        <label>Full name<input id="staff-full-name" maxlength="120" autocomplete="name" required></label>
         <label>Staff email<input id="staff-email" type="email" required></label>
         <label>Role<select id="staff-role"><option value="cashier">Cashier</option><option value="manager">Manager</option><option value="admin">Admin</option></select></label>
         <fieldset class="branch-checks"><legend>Branch access</legend>${S.branches.map(branch => `<label><input type="checkbox" name="staff-branch" value="${branch.id}" ${branch.id === S.branchId ? "checked" : ""}>${esc(branch.name)}</label>`).join("")}</fieldset>
         <button class="btn" type="submit">Create account</button>
       </form>
+    </section>
+    <section class="card staff-directory"><h2>Registered users</h2><p class="mute">Users assigned to this pharmacy organization. Set names for existing accounts so sales can be identified by staff member.</p>
+      ${S.staffLoading ? '<p class="mute">Loading registered users…</p>' : staffRows ? `<div class="tbl"><table><tr><th>Full name</th><th>Email</th><th>Role(s)</th><th>Branch(es)</th><th>Status</th></tr>${staffRows}</table></div>` : '<div class="empty">No registered users found.</div>'}
     </section>
   </div>`;
 }
@@ -240,13 +248,59 @@ async function createStaff(event) {
   if (!branchIds.length) return toast("Select at least one branch for this staff member.");
   try {
     const result = await api("/staff/create", { method: "POST", body: {
-      email: $("#staff-email").value, role: $("#staff-role").value, branch_ids: branchIds
+      full_name: $("#staff-full-name").value, email: $("#staff-email").value,
+      role: $("#staff-role").value, branch_ids: branchIds
     } });
     createdStaffAccount = { email: result.email, temporaryPassword: result.temporary_password };
+    S.staffLoading = true;
     event.target.reset();
+    await loadStaffDirectory();
     render();
     toast("Staff account created. Share the temporary password securely.");
   } catch (error) { toast(error.message); }
+}
+async function loadStaffDirectory() {
+  if (!S.user || !["owner", "admin"].includes(S.role) || !S.branchId) return;
+  const branchId = S.branchId;
+  S.staffLoading = true;
+  try {
+    const result = await api(`/staff?branch_id=${encodeURIComponent(branchId)}`, { loading: false });
+    if (branchId === S.branchId) S.staff = result.staff;
+  } catch (error) {
+    if (branchId === S.branchId) toast(error.message);
+  } finally {
+    if (branchId === S.branchId) {
+      S.staffLoading = false;
+      if (S.tab === "manage") render();
+    }
+  }
+}
+async function updateStaffName(event, staffId) {
+  event.preventDefault();
+  try {
+    const result = await api(`/staff/${encodeURIComponent(staffId)}?branch_id=${encodeURIComponent(S.branchId)}`, {
+      method: "PATCH", body: { full_name: $(`#staff-name-${staffId}`).value }
+    });
+    const staff = S.staff.find(item => item.id === staffId);
+    if (staff) staff.full_name = result.full_name;
+    render();
+    toast("Staff name updated.");
+  } catch (error) { toast(error.message); }
+}
+async function loadActivity() {
+  if (!canViewActivity() || !S.branchId) return;
+  const branchId = S.branchId;
+  try {
+    const result = await api(`/activity?branch_id=${encodeURIComponent(branchId)}`, { loading: false });
+    if (branchId === S.branchId) S.activity = result.activity;
+  } catch (error) {
+    if (branchId === S.branchId) {
+      S.activity = [];
+      toast(error.message);
+    }
+  } finally {
+    if (branchId === S.branchId && S.tab === "activity") render();
+  }
 }
 async function login(event) {
   event.preventDefault();
@@ -272,7 +326,7 @@ async function logout() {
   try { await api("/auth/logout", { method: "POST" }, false); }
   catch (error) { console.error("Sign-out request failed.", error); }
   createdStaffAccount = null;
-  S = { user: null, branches: [], branchId: "", role: "", products: [], sales: [], salesSummary: {}, activity: [], cart: [], tab: "sell", q: "", disc: 0, pay: "Cash", tender: "", patient: "", prescriber: "" };
+  S = { user: null, branches: [], branchId: "", role: "", products: [], sales: [], salesSummary: {}, activity: [], staff: [], staffLoading: false, cart: [], tab: "sell", q: "", disc: 0, pay: "Cash", tender: "", patient: "", prescriber: "" };
   render();
 }
 async function loadWorkspace() {
@@ -292,6 +346,8 @@ async function loadWorkspace() {
     }
     restoreWorkspaceView(user, branches);
     await loadBranchData();
+    if (S.tab === "activity") await loadActivity();
+    if (S.tab === "manage") await loadStaffDirectory();
     saveWorkspaceView();
     const reference = new URLSearchParams(location.search).get("reference");
     if (reference) {
@@ -310,9 +366,12 @@ async function loadWorkspace() {
 }
 async function loadBranchData() {
   if (!S.branchId) return;
+  S.role = S.branches.find(item => item.id === S.branchId)?.role || "";
+  S.activity = [];
+  S.staff = [];
   const branch = encodeURIComponent(S.branchId);
-  const [products, sales, activity] = await Promise.all([
-    api(`/products?branch_id=${branch}`), api(`/sales?branch_id=${branch}`), api(`/activity?branch_id=${branch}`)
+  const [products, sales] = await Promise.all([
+    api(`/products?branch_id=${branch}`), api(`/sales?branch_id=${branch}`)
   ]);
   S.products = products.products.map(product => ({
     ...product, cat: product.category, price: Number(product.price), min: Number(product.min), qty: Number(product.qty),
@@ -321,8 +380,6 @@ async function loadBranchData() {
     }))
   }));
   applySalesData(sales);
-  S.activity = activity.activity;
-  S.role = S.branches.find(item => item.id === S.branchId)?.role || "";
 }
 function applySalesData(sales) {
   S.sales = sales.sales.map(sale => ({
@@ -354,10 +411,18 @@ function restoreWorkspaceView(user, branches) {
   const savedBranch = localStorage.getItem(`friends-pharmacy-branch:${user.id}`);
   S.branchId = branches.some(branch => branch.id === savedBranch) ? savedBranch : branches[0].id;
   const role = branches.find(branch => branch.id === S.branchId)?.role;
-  const allowedTabs = ["sell", "stock", "alerts", "sales", "activity"];
-  if (["owner", "admin"].includes(role)) allowedTabs.push("manage");
+  const allowedTabs = allowedWorkspaceTabs(role);
   const savedTab = localStorage.getItem(`friends-pharmacy-tab:${user.id}`);
   S.tab = allowedTabs.includes(savedTab) ? savedTab : "sell";
+}
+function allowedWorkspaceTabs(role) {
+  const tabs = ["sell", "stock", "alerts", "sales"];
+  if (["owner", "admin", "manager"].includes(role)) tabs.push("activity");
+  if (["owner", "admin"].includes(role)) tabs.push("manage");
+  return tabs;
+}
+function canViewActivity() {
+  return ["owner", "admin", "manager"].includes(S.role);
 }
 function saveWorkspaceView() {
   if (!S.user?.id || S.user.must_change_password || !S.branchId) return;
@@ -373,6 +438,9 @@ async function changeBranch(id) {
   S.tender = "";
   try {
     await loadBranchData();
+    if (!allowedWorkspaceTabs(S.role).includes(S.tab)) S.tab = "sell";
+    if (S.tab === "activity") await loadActivity();
+    if (S.tab === "manage") await loadStaffDirectory();
     saveWorkspaceView();
     render();
   }
@@ -401,18 +469,22 @@ function nav() {
     $("#nav").innerHTML = `<span class="nav-user">${esc(S.user.email)}</span><button onclick="logout()">Sign out</button>`;
     return;
   }
-  const tabs = [["sell", "Sell"], ["stock", "Stock"], ["alerts", "Alerts"], ["sales", "Sales"], ["activity", "Activity"]];
+  const tabs = [["sell", "Sell"], ["stock", "Stock"], ["alerts", "Alerts"], ["sales", "Sales"]];
+  if (canViewActivity()) tabs.push(["activity", "Activity"]);
   if (["owner", "admin"].includes(S.role)) tabs.push(["manage", "Manage"]);
   $("#nav").innerHTML = `<select class="branch-picker" aria-label="Pharmacy branch" onchange="changeBranch(this.value)">${S.branches.map(branch => `<option value="${branch.id}" ${branch.id === S.branchId ? "selected" : ""}>${esc(branch.name)}</option>`).join("")}</select>` +
     tabs.map(([k, l]) => `<button class="${S.tab === k ? "on" : ""}" onclick="go('${k}')">${l}${k === "alerts" && alerts() ? `<span class="badge">${alerts()}</span>` : ""}</button>`).join("") +
     `<span class="nav-user">${esc(S.user.email)}</span><button onclick="logout()">Sign out</button>`;
 }
 const go = t => {
+  if (!allowedWorkspaceTabs(S.role).includes(t)) return;
   if (t !== "manage") createdStaffAccount = null;
   S.tab = t;
   saveWorkspaceView();
   render();
   if (t === "sales") refreshBranchSales(true);
+  if (t === "activity") loadActivity();
+  if (t === "manage") loadStaffDirectory();
 };
 
 function vLogin() {
@@ -789,7 +861,7 @@ function salesSummaryCards() {
 }
 function salesHistory() {
   const completedSales = S.sales.filter(s => s.status === "completed");
-  return `${completedSales.length ? `<div class="tbl"><table><tr><th>#</th><th>Date</th><th>Items</th><th>Payment</th><th>Patient</th><th>Total</th><th></th></tr>${completedSales.map(s => `<tr><td>${s.no}</td><td>${new Date(s.at).toLocaleString()}</td><td>${s.items.reduce((a, i) => a + i.qty, 0)}</td><td>${esc(s.pay)}</td><td>${esc(s.patient) || "-"}</td><td><b>${money(s.total)}</b></td><td><button class="btn alt sm" onclick="showReceipt(S.sales.find(x=>x.id==='${s.id}'))">Receipt</button></td></tr>`).join("")}</table></div>` : '<div class="empty">No completed sales yet. Complete a sale on the Sell tab and it will appear here.</div>'}<p class="mute sales-history-count">Showing ${completedSales.length} completed sale${completedSales.length === 1 ? "" : "s"} from up to the latest 500 records.</p>`;
+  return `${completedSales.length ? `<div class="tbl"><table><tr><th>#</th><th>Date</th><th>Sold by</th><th>Items</th><th>Payment</th><th>Patient</th><th>Total</th><th></th></tr>${completedSales.map(s => `<tr><td>${s.no}</td><td>${new Date(s.at).toLocaleString()}</td><td>${esc(s.sold_by || "Unknown staff")}</td><td>${s.items.reduce((a, i) => a + i.qty, 0)}</td><td>${esc(s.pay)}</td><td>${esc(s.patient) || "-"}</td><td><b>${money(s.total)}</b></td><td><button class="btn alt sm" onclick="showReceipt(S.sales.find(x=>x.id==='${s.id}'))">Receipt</button></td></tr>`).join("")}</table></div>` : '<div class="empty">No completed sales yet. Complete a sale on the Sell tab and it will appear here.</div>'}<p class="mute sales-history-count">Showing ${completedSales.length} completed sale${completedSales.length === 1 ? "" : "s"} from up to the latest 500 records.</p>`;
 }
 function refreshSalesView() {
   const stats = $("#sales-stats");
@@ -803,16 +875,16 @@ function vSales() {
   <div id="sales-history">${salesHistory()}</div></div>`;
 }
 function exportCsv() {
-  const rows = [["Receipt", "Date", "Payment", "Patient", "Item", "Qty", "Price", "Sale total"]];
-  S.sales.filter(s => s.status === "completed").forEach(s => s.items.forEach(i => rows.push([s.no, s.at, s.pay, s.patient, i.name, i.qty, i.price, s.total])));
+  const rows = [["Receipt", "Date", "Sold by", "Payment", "Patient", "Item", "Qty", "Price", "Sale total"]];
+  S.sales.filter(s => s.status === "completed").forEach(s => s.items.forEach(i => rows.push([s.no, s.at, s.sold_by || "Unknown staff", s.pay, s.patient, i.name, i.qty, i.price, s.total])));
   const csv = rows.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(",")).join("\n");
   const b = new Blob([csv], { type: "text/csv" }), a = document.createElement("a");
   a.href = URL.createObjectURL(b); a.download = "sales.csv"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 function vActivity() {
   const actions = `<div class="row wrap activity-actions"><button class="btn alt" onclick="exportCsv()">Export sales CSV</button></div>`;
-  const rows = S.activity.map(event => `<tr><td>${new Date(event.at).toLocaleString()}</td><td><span class="tag">${esc(event.type)}</span></td><td>${esc(event.message)}</td></tr>`).join("");
-  return `<section class="card">${actions}<h2>Recent activity</h2><p class="mute">Recent actions are recorded on the server for this branch. Configure database backups in your Supabase project.</p>${rows ? `<div class="tbl"><table><tr><th>Date</th><th>Activity</th><th>Details</th></tr>${rows}</table></div>` : '<div class="empty">No activity recorded yet.</div>'}</section>`;
+  const rows = S.activity.map(event => `<tr><td>${new Date(event.at).toLocaleString()}</td><td>${esc(event.user_name || event.user_email || "System")}</td><td><span class="tag">${esc(event.type)}</span></td><td>${esc(event.message)}</td></tr>`).join("");
+  return `<section class="card">${actions}<h2>Recent activity</h2><p class="mute">Recent actions are recorded on the server for this branch. Configure database backups in your Supabase project.</p>${rows ? `<div class="tbl"><table><tr><th>Date</th><th>Staff</th><th>Activity</th><th>Details</th></tr>${rows}</table></div>` : '<div class="empty">No activity recorded yet.</div>'}</section>`;
 }
 
 async function startApp() {

@@ -4,9 +4,9 @@ A multi-branch pharmacy point-of-sale and inventory application. The browser UI 
 
 ## Current capabilities
 
-- Staff sign-in, password recovery, branch selection, and role-aware branch/staff administration.
+- Staff sign-in, password recovery, branch selection, and role-aware branch/staff administration with a full-name directory.
 - Organization-wide medicine catalogue with branch-specific batch inventory and expiry dates.
-- FEFO stock allocation, expiry/low-stock warnings, server-validated sales, and branch activity history.
+- FEFO stock allocation, expiry/low-stock warnings, server-validated sales with seller attribution, and manager/admin-only branch activity history.
 - Cash checkout and Paystack card/mobile-money checkout. Online payments reserve stock and are only completed after server-side gateway verification.
 - All-time/today sales summaries, printable receipts, and CSV export of the latest 500 sales.
 - Sales history refreshes when revisited and while open, and the last selected branch and page are remembered per staff account on that device.
@@ -39,13 +39,13 @@ The migration disables direct table access for browser roles and enables row-lev
 
 For the first administrator, create the Auth user in Supabase before signing in. The first successful login is shown the organization/branch setup form. The API only allows bootstrap for `INITIAL_ADMIN_EMAIL`, and setup can only be completed once.
 
-Owners and admins can create staff accounts by email and assign roles/branches. The server generates a one-time temporary password and shows it to the administrator once; share it with the staff member through a secure channel. The first successful login is restricted to setting a new password. The API enforces that restriction until the password is changed. Staff creation does not depend on Supabase email delivery.
+Owners and admins can create staff accounts with a full name, email, and assigned role/branches. The Manage page lists registered users in the organization and lets administrators fill in or correct existing staff names. The server generates a one-time temporary password and shows it to the administrator once; share it with the staff member through a secure channel. The first successful login is restricted to setting a new password. The API enforces that restriction until the password is changed. Staff creation does not depend on Supabase email delivery. Sales history and CSV exports identify the staff member who completed each sale. Cashiers cannot access activity/system logs; owners, admins, and managers can.
 
 ## Vercel deployment
 
 1. Connect the Vercel project to `gvafram3/friends_pharmacy` under **Project → Settings → Git** and set `main` as the Production Branch. Vercel will create Preview deployments for other branches and deploy Production on each push to `main`.
 2. In **Project → Settings → Environment Variables**, add `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `INITIAL_ADMIN_EMAIL` to **Preview** and **Production**. Add `APP_URL` and `CRON_SECRET` to **Production**. Enter secrets directly in Vercel; never send them in chat or commit them. Keep `PAYSTACK_SECRET_KEY` unset until ready to test Paystack.
-3. Apply `supabase/migrations/202611110002_create_staff_membership.sql` in the Supabase SQL Editor before using staff account creation. The initial schema migration must already be applied.
+3. Apply `supabase/migrations/202611110002_create_staff_membership.sql` and `supabase/migrations/202611110003_staff_directory_and_activity_permissions.sql` in the Supabase SQL Editor before using staff administration and activity permissions. The initial schema migration must already be applied.
 4. Configure Supabase Auth's site URL and redirect allow-list for the production domain. Recovery links use `APP_URL`.
 5. Push changes to a branch to get a Preview deployment; merge or push to `main` for Production. Verify the Vercel deployment is Ready, then test login, staff password setup, inventory, cash checkout, and receipts using test data.
 6. For Paystack, add a test secret key only to Vercel's server environment, then configure the test webhook at `https://your-domain/api/payments/webhook`. Keep live credentials unset until test-mode and compliance reviews are complete.
